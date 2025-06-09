@@ -1,0 +1,57 @@
+# -------------------------------
+# Web Framework
+# -------------------------------
+fastapi==0.109.2
+uvicorn==0.27.1
+gradio==4.19.2
+python-multipart==0.0.9
+
+# -------------------------------
+# LangChain Ecosystem
+# -------------------------------
+langchain
+langchain-core
+langchain-community
+langchain-google-genai==0.0.11 # Keep this specific version if you need it, otherwise remove pin
+langchain-huggingface # Removed specific version to aid resolution
+
+# -------------------------------
+# Database and ORM
+# -------------------------------
+sqlalchemy==2.0.27
+pymysql==1.1.0
+psycopg2-binary==2.9.9
+cx_Oracle==8.3.0
+pyodbc==5.0.1
+mysql-connector-python==8.3.0
+
+# -------------------------------
+# Data Processing
+# -------------------------------
+pandas==2.2.0
+numpy==1.26.2
+
+# -------------------------------
+# Vector Store and Embeddings
+# -------------------------------
+faiss-cpu
+sentence-transformers
+torch
+transformers
+
+# -------------------------------
+# Google AI
+# -------------------------------
+google-generativeai==0.4.1
+
+# -------------------------------
+# Utilities and Security
+# -------------------------------
+python-dotenv==1.0.1
+pydantic==2.11.5
+requests==2.32.3
+tqdm==4.67.1
+typer==0.9.0
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+typing-extensions>=4.12.2

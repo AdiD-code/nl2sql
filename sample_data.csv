@@ -1,0 +1,16 @@
+date,product,category,region,sales_amount,quantity,customer_type
+2024-01-01,Laptop,Electronics,North,1200.50,2,Corporate
+2024-01-02,Smartphone,Electronics,South,800.75,3,Retail
+2024-01-03,Desk Chair,Furniture,East,350.25,1,Corporate
+2024-01-04,Monitor,Electronics,West,450.00,2,Retail
+2024-01-05,Office Desk,Furniture,North,600.00,1,Corporate
+2024-01-06,Keyboard,Electronics,South,120.50,4,Retail
+2024-01-07,Printer,Electronics,East,300.75,1,Corporate
+2024-01-08,Bookshelf,Furniture,West,250.00,2,Retail
+2024-01-09,Tablet,Electronics,North,550.25,2,Corporate
+2024-01-10,Office Chair,Furniture,South,275.50,3,Retail
+2024-01-11,Headphones,Electronics,East,150.00,5,Corporate
+2024-01-12,Desk Lamp,Furniture,West,75.25,4,Retail
+2024-01-13,Laptop,Electronics,North,1300.00,1,Corporate
+2024-01-14,Smartphone,Electronics,South,850.50,2,Retail
+2024-01-15,Desk Chair,Furniture,East,375.75,2,Corporate 
