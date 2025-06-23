@@ -44,6 +44,7 @@ node_modules/
 frontend/
 frontend/node_modules/
 package-lock.json
+notebooks/
 
 # Logs
 *.log
