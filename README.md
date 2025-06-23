@@ -1,78 +1,72 @@
-# NL2SQL - Natural Language to SQL Converter
+# NL2SQL: Natural Language to SQL Converter
 
-A powerful tool that converts natural language questions into SQL queries using LangChain and Google's Gemini model. Connect to your existing databases and start querying them in natural language!
+This project lets users upload their own SQL databases and query them using natural language, powered by LLMs (Large Language Models) like Google Gemini.
 
 ## Features
+- **Upload any database** (SQLite, MySQL, PostgreSQL, etc.) and query it with natural language.
+- **Automatic schema analysis** and dynamic table/column selection for each question.
+- **Mini-schema optimization**: Only relevant tables/columns are sent to the LLM for each query, making it fast and scalable for large databases.
+- **Persistent conversation memory** (with SQLite) for context-aware, multi-turn chat.
+- **Summarization** for long conversations.
+- **Performance monitoring** and timing logs for each major step (table selection, LLM call, SQL execution).
+- **Robust fallback**: If semantic table selection fails, falls back to keyword-based selection.
+- **Configurable LLM model**: Easily change the Gemini model in `main.py` via `config.MODEL_NAME`.
 
-- Natural language to SQL conversion
-- Support for multiple database types:
-  - MySQL
-  - PostgreSQL
-  - SQLite
-  - Oracle
-  - Microsoft SQL Server
-- Conversation history for context-aware queries
-- Beautiful Gradio interface
-- Built-in query validation and safety checks
-- Performance monitoring
+## Quick Start
 
-## Setup
+1. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/nl2sql.git
-cd nl2sql
-```
+2. **Set up your LLM provider**
+   - **Google Gemini (default):**
+     - Get a [Google Gemini API key](https://ai.google.dev/)
+     - Set it in your environment or `.env` file:
+       ```
+       GOOGLE_API_KEY=your-key-here
+       ```
+     - The default model is `gemini-1.5-pro-002`. You can change this in `main.py`:
+       ```python
+       config.MODEL_NAME = "gemini-1.5-pro-002"  # or another supported model
+       ```
+   - **Other providers:**
+     - (Planned) You can add support for OpenAI, local models, or user-supplied keys in the future.
 
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+3. **Run the app**
+   ```bash
+   python main.py
+   ```
+   - The Gradio UI will be available at http://localhost:7860
 
-3. Set up your environment variables:
-   - Create a `.env` file
-   - Add your Google API key: `GOOGLE_API_KEY=your_api_key_here`
+4. **Upload or connect to your database**
+   - Use the UI to upload a SQLite file or enter a connection string for MySQL/PostgreSQL/etc.
 
-## Usage
+5. **Ask questions!**
+   - Try queries like "How many movies has Tom Hanks been in? Name them."
 
-1. Start the application:
-```bash
-python main.py
-```
+## Current Limitations & Notes
 
-2. Open your browser and go to `http://localhost:7860`
+- **Gemini API Quota:**
+  - The free tier has strict per-minute and per-day limits. If you see 429 errors, you have exceeded your quota. Wait for reset, use a different key, or upgrade your plan.
+  - For deployment, consider letting users supply their own API keys or supporting multiple providers.
 
-3. Connect to your database:
-   - Enter your database connection string in the format:
-     - MySQL: `mysql+pymysql://username:password@host:port/database`
-     - PostgreSQL: `postgresql://username:password@host:port/database`
-     - SQLite: `sqlite:///path/to/your/database.db`
-   - Or upload a SQLite database file directly
+- **Semantic Table Selection:**
+  - If semantic selection fails (e.g., due to vectorstore/embedding issues), the system falls back to keyword-based selection and logs the error.
 
-4. Start asking questions in natural language:
-   - "Show me the top 10 customers by sales"
-   - "What's the average order value this month?"
-   - "List all products with stock below 100"
-   - "Find customers who haven't ordered in the last 30 days"
+- **LLM Model Configuration:**
+  - Change the model by editing `config.MODEL_NAME` in `main.py`.
 
-## Example Queries
+- **Performance:**
+  - Timing logs are printed for table selection, mini-schema construction, LLM call, and SQL execution to help you profile and optimize.
 
-The system understands complex queries like:
-- Aggregations: "What's the total revenue by product category?"
-- Joins: "Show me all orders with customer details"
-- Filters: "List all products with price above $100"
-- Time-based: "What were the sales trends last quarter?"
-- Comparisons: "Which products have above-average sales?"
+## Next Steps / TODO
+- Add support for user-supplied API keys in the UI.
+- Add multi-provider fallback (Gemini, OpenAI, local models).
+- Integrate dynamic few-shot example selection for each question.
+- Implement caching for table selection and LLM outputs.
+- Add more robust error handling and user feedback for quota issues.
 
-## Project Structure
+---
 
-- `main.py`: Main application file
-- `requirements.txt`: Python dependencies
-
-## Contributing
-
-Feel free to submit issues and enhancement requests!
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details. 
+**Contributions and feedback are welcome!** 

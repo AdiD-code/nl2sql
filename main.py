@@ -16,6 +16,16 @@ import asyncio
 from functools import lru_cache
 import time
 from dotenv import load_dotenv
+from typing_extensions import TypedDict
+from langgraph.checkpoint.sqlite import SqliteSaver
+import langgraph
+import traceback
+import time as _time
+
+#added for langgraph debugging
+# print('langgraph path:', langgraph.__file__)
+# print('langgraph version:', getattr(langgraph, '__version__', 'unknown'))
+# print('SqliteSaver methods:', dir(SqliteSaver))
 
 # Configure logging first
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +51,6 @@ from langchain.chains import create_sql_query_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
-from langchain.memory import ChatMessageHistory
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.example_selectors import SemanticSimilarityExampleSelector
 
@@ -66,6 +75,7 @@ class Config:
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"  # Changed to HuggingFace model
     LLM_TEMPERATURE: float = 0.1
     MAX_CONVERSATION_HISTORY: int = 10
+    MODEL_NAME: str = "gemini-1.5-pro-002"  # Default Gemini model, configurable
 
 config = Config()
 
@@ -154,11 +164,38 @@ class DatabaseManager:
         if not self.db:
             return
             
+        table_names = self.db.get_usable_table_names()
+        table_info = self.db.table_info
+        # Extract column names for each table
+        column_info = {}
+        for table in table_names:
+            try:
+                # Use PRAGMA for SQLite, or SQLAlchemy inspector for others
+                if self.db_type == "sqlite":
+                    conn = sqlite3.connect(self.connection_string.replace('sqlite:///', ''))
+                    cursor = conn.execute(f'PRAGMA table_info({table})')
+                    columns = [row[1] for row in cursor.fetchall()]
+                    conn.close()
+                else:
+                    # Use SQLAlchemy inspector
+                    try:
+                        from sqlalchemy import create_engine, inspect
+                        engine = create_engine(self.connection_string)
+                        inspector = inspect(engine)
+                        columns = [col['name'] for col in inspector.get_columns(table)]
+                    except Exception as e:
+                        logger.error(f"Could not use SQLAlchemy inspector for table {table}: {e}")
+                        columns = []
+                column_info[table] = columns
+            except Exception as e:
+                logger.warning(f"Could not extract columns for table {table}: {e}")
+                column_info[table] = []
         self.table_info_cache = {
-            'table_names': self.db.get_usable_table_names(),
-            'table_info': self.db.table_info,
+            'table_names': table_names,
+            'table_info': table_info,
             'dialect': str(self.db.dialect),
-            'cached_at': datetime.now()
+            'cached_at': datetime.now(),
+            'columns': column_info
         }
     
     def get_table_names(self) -> List[str]:
@@ -370,40 +407,37 @@ class TableSelector:
     
     def _semantic_selection(self, question: str, max_tables: int) -> List[str]:
         """Select tables using semantic similarity"""
-        if not self.vectorstore:
-            # Initialize vector store
-            documents = []
-            metadatas = []
-            
-            for table_name, description in self.table_descriptions.items():
-                documents.append(description)
-                metadatas.append({"table_name": table_name})
-            
-            # Create embeddings for documents
-            embeddings = self.embeddings.embed_documents(documents)
-            
-            self.vectorstore = FAISS.from_embeddings(
-                text_embeddings=embeddings,
-                embedding=self.embeddings,
-                metadatas=metadatas
-            )
-        
-        # Search for relevant tables
-        max_tables = max_tables or config.MAX_TABLES_PER_QUERY
-        results = self.vectorstore.similarity_search(question, k=max_tables)
-        
-        selected_tables = []
-        for result in results:
-            table_name = result.metadata["table_name"]
-            selected_tables.append(table_name)
-            
-            # Add related tables
-            if table_name in self.table_relationships:
-                for related_table in self.table_relationships[table_name]:
-                    if related_table not in selected_tables and len(selected_tables) < max_tables:
-                        selected_tables.append(related_table)
-        
-        return selected_tables[:max_tables]
+        try:
+            if not self.vectorstore:
+                # Initialize vector store
+                documents = []
+                metadatas = []
+                for table_name, description in self.table_descriptions.items():
+                    documents.append(description)
+                    metadatas.append({"table_name": table_name})
+                # Create embeddings for documents
+                embeddings = self.embeddings.embed_documents(documents)
+                self.vectorstore = FAISS.from_embeddings(
+                    text_embeddings=embeddings,
+                    embedding=self.embeddings,
+                    metadatas=metadatas
+                )
+            # Search for relevant tables
+            max_tables = max_tables or config.MAX_TABLES_PER_QUERY
+            results = self.vectorstore.similarity_search(question, k=max_tables)
+            selected_tables = []
+            for result in results:
+                table_name = result.metadata["table_name"]
+                selected_tables.append(table_name)
+                # Add related tables
+                if table_name in self.table_relationships:
+                    for related_table in self.table_relationships[table_name]:
+                        if related_table not in selected_tables and len(selected_tables) < max_tables:
+                            selected_tables.append(related_table)
+            return selected_tables[:max_tables]
+        except Exception as e:
+            logger.error(f"Semantic selection failed: {e}")
+            return self._keyword_based_selection(question, max_tables)
     
     def _keyword_based_selection(self, question: str, max_tables: int) -> List[str]:
         """Fallback keyword-based table selection"""
@@ -558,43 +592,95 @@ class ExampleManager:
         scored_examples.sort(key=lambda x: x[1], reverse=True)
         return [example for example, score in scored_examples[:k] if score > 0]
 
-class ConversationManager:
-    """Enhanced conversation manager with context awareness"""
-    
-    def __init__(self):
-        self.histories = {}  # Multiple conversation histories
+class MessagesState(TypedDict, total=False):
+    messages: list  # List of message dicts (HumanMessage, AIMessage, etc.)
+    summary: str    # Optional running summary for long conversations
+    # Add more fields as needed (e.g., metadata, user info)
+
+class PersistentConversationManager:
+    """Persistent conversation manager using SqliteSaver for stateful, resumable chat."""
+    def __init__(self, db_path: str = "conversation_memory.sqlite"):
+        if isinstance(db_path, str):
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+        else:
+            conn = db_path  # Assume it's already a sqlite3.Connection
+        self.saver = SqliteSaver(conn)
         self.default_session = "default"
-    
-    def get_history(self, session_id: str = None) -> ChatMessageHistory:
-        """Get or create conversation history for session"""
+
+    def get_state(self, session_id: str = None) -> MessagesState:
         session_id = session_id or self.default_session
-        
-        if session_id not in self.histories:
-            self.histories[session_id] = ChatMessageHistory()
-        
-        return self.histories[session_id]
-    
+        config = {'configurable': {'checkpoint_ns': 'nl2sql', 'thread_id': session_id}}
+        state = self.saver.get(config)
+        if state is None:
+            # Initialize new state
+            state = MessagesState(messages=[], summary="")
+            state['id'] = session_id
+            self.saver.put(config, state, {}, {})
+        # Defensive: filter messages to only dicts with required keys
+        msgs = state.get("messages", [])
+        filtered_msgs = []
+        for m in msgs:
+            if isinstance(m, dict) and "type" in m and "content" in m:
+                filtered_msgs.append(m)
+            else:
+                logger.warning(f"Filtered out malformed message from state: {m}")
+        state["messages"] = filtered_msgs
+        return state
+
+    def update_state(self, session_id: str, state: MessagesState):
+        state['id'] = session_id
+        config = {'configurable': {'checkpoint_ns': 'nl2sql', 'thread_id': session_id}}
+        self.saver.put(config, state, {}, {})
+
     def add_interaction(self, question: str, response: str, session_id: str = None):
-        """Add question-response pair to conversation history"""
-        history = self.get_history(session_id)
-        history.add_user_message(question)
-        history.add_ai_message(response)
-        
-        # Limit history size
-        if len(history.messages) > config.MAX_CONVERSATION_HISTORY * 2:
-            # Remove oldest messages (keep pairs)
-            history.messages = history.messages[-config.MAX_CONVERSATION_HISTORY * 2:]
-    
-    def get_context_messages(self, session_id: str = None) -> List:
-        """Get context messages for the conversation"""
-        history = self.get_history(session_id)
-        return history.messages
-    
-    def clear_history(self, session_id: str = None):
-        """Clear conversation history"""
         session_id = session_id or self.default_session
-        if session_id in self.histories:
-            del self.histories[session_id]
+        state = self.get_state(session_id)
+        # Add user and AI messages
+        state.setdefault("messages", [])
+        logger.debug(f"Adding interaction: human={{'type': 'human', 'content': {question}}}, ai={{'type': 'ai', 'content': {response}}}")
+        state["messages"].append({"type": "human", "content": question})
+        state["messages"].append({"type": "ai", "content": response})
+        # Optionally trim history (keep last N pairs)
+        max_msgs = config.MAX_CONVERSATION_HISTORY * 2
+        if len(state["messages"]) > max_msgs:
+            state["messages"] = state["messages"][-max_msgs:]
+        self.update_state(session_id, state)
+
+    def get_context_messages(self, session_id: str = None) -> List:
+        session_id = session_id or self.default_session
+        state = self.get_state(session_id)
+        return state.get("messages", [])
+
+    def clear_history(self, session_id: str = None):
+        session_id = session_id or self.default_session
+        state = MessagesState(messages=[], summary="")
+        self.update_state(session_id, state)
+
+    def summarize_history_if_needed(self, session_id: str, llm, threshold: int = 8, keep_last: int = 4):
+        """
+        If the message history is long, summarize all but the most recent N messages using the LLM.
+        Store the summary in the state and trim the message list.
+        """
+        state = self.get_state(session_id)
+        messages = state.get("messages", [])
+        if len(messages) > threshold:
+            # Prepare text to summarize (all but last N messages)
+            to_summarize = messages[:-keep_last]
+            recent = messages[-keep_last:]
+            # Build a plain text version for summarization
+            summary_text = "\n".join([
+                f"User: {m['content']}" if m['type'] == 'human' else f"AI: {m['content']}" for m in to_summarize
+            ])
+            # Summarize using the LLM
+            prompt = ChatPromptTemplate.from_template(
+                """Summarize the following conversation between a user and an AI assistant. Focus on the key facts, context, and any important details that should be remembered for future follow-up questions.\n\nConversation:\n{history}\n\nSummary:"""
+            )
+            summary_chain = prompt | llm | StrOutputParser()
+            summary = summary_chain.invoke({"history": summary_text})
+            # Update state
+            state["summary"] = summary
+            state["messages"] = recent
+            self.update_state(session_id, state)
 
 class NL2SQLChain:
     """Main NL2SQL chain orchestrator"""
@@ -605,7 +691,7 @@ class NL2SQLChain:
         self.query_cleaner = QueryCleaner()
         self.table_selector = TableSelector(config.EMBEDDING_MODEL)
         self.example_manager = ExampleManager()
-        self.conversation_manager = ConversationManager()
+        self.conversation_manager = PersistentConversationManager()
         self.query_executor = None
         self._initialize_llm()
     
@@ -615,11 +701,11 @@ class NL2SQLChain:
             # Try Google Gemini first (free tier available)
             if os.getenv("GOOGLE_API_KEY"):
                 self.llm = GoogleGenerativeAI(
-                    model="gemini-pro",
+                    model=config.MODEL_NAME,
                     temperature=config.LLM_TEMPERATURE,
                     google_api_key=os.getenv("GOOGLE_API_KEY")
                 )
-                logger.info("Initialized Google Gemini model")
+                logger.info(f"Initialized Google Gemini model: {config.MODEL_NAME}")
             else:
                 raise ValueError("GOOGLE_API_KEY not found")
                 
@@ -669,11 +755,48 @@ class NL2SQLChain:
             
             logger.info("Database schema loaded successfully")
             
-            # Get conversation history
-            history = self.conversation_manager.get_history(session_id)
-            logger.info(f"Conversation history length: {len(history.messages)}")
-            
-            # Create the SQL query chain with conversation history
+            # Summarize history if needed (for long conversations)
+            self.conversation_manager.summarize_history_if_needed(session_id, self.llm)
+            # Get conversation state (summary + recent messages)
+            state = self.conversation_manager.get_state(session_id)
+            summary = state.get("summary", "")
+            messages = state.get("messages", [])
+            logger.info(f"Conversation history length (post-summary): {len(messages)}; Summary present: {bool(summary)}")
+            # Build context for the LLM: summary (if present) + recent messages + current question
+            context_parts = []
+            if summary:
+                context_parts.append(f"Summary of previous conversation: {summary}")
+            for m in messages:
+                logger.debug(f"Processing message in context: type={type(m)}, value={m}")
+                if isinstance(m, dict) and "type" in m and "content" in m:
+                    if m["type"] == "human":
+                        context_parts.append(f"User: {m['content']}")
+                    elif m["type"] == "ai":
+                        context_parts.append(f"AI: {m['content']}")
+                else:
+                    logger.warning(f"Malformed message in context: {m}")
+            context_parts.append(f"User: {question}")
+            full_context = "\n".join(context_parts)
+
+            # --- OPTIMIZATION: Only send relevant tables/columns to the LLM ---
+            t0 = _time.time()
+            relevant_tables = self.table_selector.select_relevant_tables(question)
+            t1 = _time.time()
+            columns_cache = self.db_manager.table_info_cache.get('columns', {})
+            mini_schema_lines = []
+            for table in relevant_tables:
+                cols = columns_cache.get(table, [])
+                if cols:
+                    mini_schema_lines.append(f"Table: {table} (columns: {', '.join(cols)})")
+                else:
+                    mini_schema_lines.append(f"Table: {table}")
+            mini_schema = "\n".join(mini_schema_lines)
+            t2 = _time.time()
+            logger.info(f"Mini-schema for prompt:\n{mini_schema}")
+            logger.info(f"Table selection took {t1-t0:.3f}s; Mini-schema construction took {t2-t1:.3f}s")
+            # ---------------------------------------------------------------
+
+            # Create the SQL query chain with context
             try:
                 query_chain = create_sql_query_chain(
                     llm=self.llm,
@@ -682,18 +805,20 @@ class NL2SQLChain:
                 )
                 logger.info("SQL query chain created successfully")
             except Exception as e:
-                logger.error(f"Failed to create SQL query chain: {e}")
+                logger.error(f"Failed to create SQL query chain: {e}\n{traceback.format_exc()}")
                 return "", "", "Failed to initialize query generation. Please try again."
-            
             # Generate query
             try:
+                t3 = _time.time()
                 raw_query = query_chain.invoke({
-                    "question": question,
-                    "table_info": self.db_manager.db.table_info
+                    "question": full_context,
+                    "table_info": mini_schema
                 })
+                t4 = _time.time()
                 logger.info(f"Generated raw query: {raw_query}")
+                logger.info(f"LLM (query_chain.invoke) took {t4-t3:.3f}s")
             except Exception as e:
-                logger.error(f"Failed to generate query: {e}")
+                logger.error(f"Failed to generate query: {e}\n{traceback.format_exc()}")
                 return "", "", "Failed to generate SQL query. Please try rephrasing your question."
             
             # Clean query
@@ -705,26 +830,28 @@ class NL2SQLChain:
             
             # Execute query
             try:
+                t5 = _time.time()
                 result = self.query_executor.invoke(cleaned_query)
+                t6 = _time.time()
                 logger.info("Query executed successfully")
+                logger.info(f"SQL execution took {t6-t5:.3f}s")
                 
                 # Format response
                 formatted_response = self._format_response(question, cleaned_query, result)
                 
                 # Add to conversation history
-                history.add_user_message(question)
-                history.add_ai_message(formatted_response)
+                self.conversation_manager.add_interaction(question, formatted_response, session_id)
                 logger.info("Added interaction to conversation history")
                 
                 return cleaned_query, str(result), formatted_response
                 
             except Exception as e:
-                error_msg = f"Query execution failed: {str(e)}"
+                error_msg = f"Query execution failed: {str(e)}\n{traceback.format_exc()}"
                 logger.error(error_msg)
                 return cleaned_query, "", error_msg
                 
         except Exception as e:
-            error_msg = f"Error processing question: {str(e)}"
+            error_msg = f"Error processing question: {str(e)}\n{traceback.format_exc()}"
             logger.error(error_msg)
             return "", "", error_msg
     
@@ -1314,7 +1441,7 @@ __all__ = [
     'QueryCleaner',
     'TableSelector',
     'ExampleManager',
-    'ConversationManager',
+    'PersistentConversationManager',
     'create_gradio_interface',
     'setup_environment',
     'create_sample_database'
